@@ -116,7 +116,7 @@ function corsHeaders(request, env) {
       "Access-Control-Allow-Origin": origin && permitted
         ? origin
         : allowed[0],
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token",
       "Access-Control-Max-Age": "86400",
       "Vary": "Origin"
@@ -168,12 +168,143 @@ async function haybiRequest(env, path, extra = {}, refId = null) {
   return result;
 }
 
+// Sinkronisasi produk HAYBI ke D1.
+// Produk lama tidak dihapus saat sinkronisasi.
+async function syncHaybiProducts(env) {
+  const result = await haybiRequest(env, "/produk");
+
+  if (
+    !result ||
+    result.rc !== "00" ||
+    !Array.isArray(result.data) ||
+    result.data.length === 0
+  ) {
+    throw new Error(
+      "Data produk HAYBI tidak valid atau kosong. Sinkronisasi dihentikan."
+    );
+  }
+
+  const db = env.DB;
+  if (!db) {
+    throw new Error("Binding D1 DB belum tersedia.");
+  }
+
+  const providerId = "haybi";
+  const now = new Date().toISOString();
+
+  await db.prepare(`
+    INSERT INTO providers
+      (id, name, code, type, base_url, is_active)
+    VALUES (?, 'HAYBI', 'HAYBI', 'h2h', ?, 1)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      code = excluded.code,
+      type = excluded.type,
+      base_url = excluded.base_url,
+      is_active = 1,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(
+    providerId,
+    env.HAYBI_BASE_URL || HAYBI_DEFAULT_URL
+  ).run();
+
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const item of result.data) {
+    const code = String(item.kode_produk || "").trim();
+    const name = String(item.nama_produk || "").trim();
+
+    if (!code || !name) {
+      skipped++;
+      continue;
+    }
+
+    const rawPrice = item.harga_jual;
+    const parsedPrice = Number(rawPrice);
+
+    const costPrice =
+      rawPrice !== null &&
+      rawPrice !== undefined &&
+      String(rawPrice).trim() !== "" &&
+      Number.isFinite(parsedPrice)
+        ? Math.round(parsedPrice)
+        : null;
+
+    const raw = JSON.stringify(item);
+
+    const existing = await db.prepare(`
+      SELECT id
+      FROM provider_products
+      WHERE provider_id = ?
+        AND provider_product_code = ?
+      LIMIT 1
+    `).bind(providerId, code).first();
+
+    if (existing) {
+      await db.prepare(`
+        UPDATE provider_products
+        SET provider_product_name = ?,
+            provider_cost_price = ?,
+            raw_metadata = ?,
+            is_active = 1,
+            synced_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(
+        name,
+        costPrice,
+        raw,
+        now,
+        existing.id
+      ).run();
+
+      updated++;
+    } else {
+      await db.prepare(`
+        INSERT INTO provider_products (
+          id,
+          provider_id,
+          provider_product_code,
+          provider_product_name,
+          provider_cost_price,
+          raw_metadata,
+          is_active,
+          synced_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      `).bind(
+        crypto.randomUUID(),
+        providerId,
+        code,
+        name,
+        costPrice,
+        raw,
+        now
+      ).run();
+
+      inserted++;
+    }
+  }
+
+  return {
+    total_dari_haybi: result.data.length,
+    produk_baru: inserted,
+    diperbarui: updated,
+    dilewati: skipped
+  };
+}
+
 export default {
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
 
     if (!cors.permitted) {
-      return json({ success: false, message: "Origin tidak diizinkan." }, 403);
+      return json({
+        success: false,
+        message: "Origin tidak diizinkan."
+      }, 403);
     }
 
     if (request.method === "OPTIONS") {
@@ -192,6 +323,36 @@ export default {
           success: true,
           service: "ZU PLAY Backend",
           status: "online"
+        }, 200, cors.headers);
+      }
+
+      // Endpoint sinkronisasi khusus admin.
+      if (
+        request.method === "POST" &&
+        path === "/api/haybi/sync"
+      ) {
+        if (!env.HAYBI_SYNC_TOKEN) {
+          return json({
+            success: false,
+            message: "HAYBI_SYNC_TOKEN belum dikonfigurasi."
+          }, 503, cors.headers);
+        }
+
+        const token = request.headers.get("X-Admin-Token");
+
+        if (token !== env.HAYBI_SYNC_TOKEN) {
+          return json({
+            success: false,
+            message: "Akses ditolak."
+          }, 401, cors.headers);
+        }
+
+        const summary = await syncHaybiProducts(env);
+
+        return json({
+          success: true,
+          message: "Sinkronisasi katalog selesai.",
+          data: summary
         }, 200, cors.headers);
       }
 
@@ -282,9 +443,10 @@ export default {
     } catch (error) {
       return json({
         success: false,
-        message: error.message || "Terjadi kesalahan pada backend."
+        message: error.message ||
+          "Terjadi kesalahan pada backend."
       }, 500, cors.headers);
     }
   }
 };
-                      
+                   
