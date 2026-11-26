@@ -61,7 +61,9 @@ async function duitkuSignature(secret, value) {
   const key = await crypto.subtle.importKey(
     "raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
   );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  const sig = await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(value)
+  );
   return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -141,12 +143,10 @@ export default {
 
       if (url.pathname === "/api/payment/create" && request.method === "POST") {
         const order = await request.json();
-
         if (!order.order_id || !order.amount || !order.product_name || !order.payment_method) {
           return withCors(json({ error: "Data pembayaran belum lengkap." }, 400), env);
         }
 
-        // Simpan order sebagai UNPAID sebelum meminta payment.
         if (env.DB) {
           await env.DB.prepare(`
             INSERT OR IGNORE INTO orders
@@ -187,13 +187,13 @@ export default {
         if (!env.DB) return new Response("OK", { status: 200 });
 
         const paid = resultCode === "00";
+
         await env.DB.prepare(`
           UPDATE orders
           SET payment_status = ?, duitku_reference = ?, updated_at = datetime('now')
           WHERE order_id = ?
         `).bind(paid ? "PAID" : "FAILED", reference, merchantOrderId).run();
 
-        // HAYBI is triggered ONLY after confirmed payment.
         if (paid) {
           const order = await env.DB.prepare(`
             SELECT * FROM orders WHERE order_id = ?

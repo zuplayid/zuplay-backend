@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id TEXT NOT NULL UNIQUE,
+  order_id TEXT UNIQUE NOT NULL,
   product_code TEXT,
   product_name TEXT NOT NULL,
   customer_id TEXT,
@@ -14,6 +14,6 @@ CREATE TABLE IF NOT EXISTS orders (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
 CREATE INDEX IF NOT EXISTS idx_orders_topup_status ON orders(topup_status);
-CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
