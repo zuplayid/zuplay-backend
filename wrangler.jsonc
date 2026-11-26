@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zuplay-backend",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-26",
+  "vars": {
+    "HAYBI_BASE_URL": "https://haybi.id/api/h2h"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "REPLACE_WITH_YOUR_D1_NAME",
+      "database_id": "REPLACE_WITH_YOUR_D1_ID"
+    }
+  ]
+}
