@@ -38,3 +38,4 @@ Catatan:
 - Callback HAYBI harus didaftarkan ke admin HAYBI.
 - Callback Duitku harus berupa URL publik HTTPS.
 - Sebelum live, lakukan testing callback, signature, idempotensi, dan transaksi.
+.
