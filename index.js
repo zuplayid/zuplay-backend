@@ -1,257 +1,78 @@
-const HAYBI_BASE_URL = "https://haybi.id/api/h2h";
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-function corsHeaders(env) {
-  const origin = env.ALLOWED_ORIGINS || "*";
-  return {
-    "access-control-allow-origin": origin,
-    "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "Content-Type, Authorization",
-    "vary": "Origin",
-  };
-}
-
-function withCors(response, env) {
-  const headers = new Headers(response.headers);
-  for (const [k, v] of Object.entries(corsHeaders(env))) headers.set(k, v);
-  return new Response(response.body, { status: response.status, headers });
-}
-
 async function md5Hex(input) {
   const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("MD5", bytes);
-  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
 
-function refId(prefix = "ZP") {
-  return `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-}
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
 
-async function haybi(env, path, payload = {}) {
-  const ref_id = payload.ref_id || refId("HAYBI");
-  const sign = await md5Hex(`${env.HAYBI_USERNAME}${env.HAYBI_API_KEY}${ref_id}`);
+  const view = new DataView(padded.buffer);
+  const bitLength = bytes.length * 8;
 
-  const body = {
-    username: env.HAYBI_USERNAME,
-    ref_id,
-    ...payload,
-    sign,
-  };
+  view.setUint32(paddedLength - 8, bitLength >>> 0, true);
+  view.setUint32(paddedLength - 4, Math.floor(bitLength / 4294967296), true);
 
-  const res = await fetch(`${env.HAYBI_BASE_URL || HAYBI_BASE_URL}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const shifts = [
+    7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+    5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
+  ];
 
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  return { httpStatus: res.status, data };
-}
-
-async function duitkuSignature(secret, value) {
-  const bytes = new TextEncoder().encode(secret);
-  const key = await crypto.subtle.importKey(
-    "raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
-  );
-  const sig = await crypto.subtle.sign(
-    "HMAC", key, new TextEncoder().encode(value)
-  );
-  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function createDuitkuPayment(env, order) {
-  if (!env.DUITKU_MERCHANT_CODE || !env.DUITKU_API_KEY) {
-    return { configured: false, message: "Duitku belum aktif/credential belum diisi." };
-  }
-
-  const base = env.DUITKU_BASE_URL || "https://passport.duitku.com";
-  const endpoint = `${base}/webapi/api/merchant/v2/inquiry`;
-  const signature = await duitkuSignature(
-    env.DUITKU_API_KEY,
-    `${env.DUITKU_MERCHANT_CODE}${order.order_id}${order.amount}`
+  const K = Array.from({ length: 64 }, (_, i) =>
+    Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0
   );
 
-  const payload = {
-    merchantCode: env.DUITKU_MERCHANT_CODE,
-    paymentAmount: Number(order.amount),
-    merchantOrderId: order.order_id,
-    productDetails: order.product_name,
-    email: order.email || "customer@zuplay.local",
-    paymentMethod: order.payment_method,
-    merchantUserInfo: order.customer_id || "",
-    customerVaName: "ZuPlay Customer",
-    phoneNumber: order.phone || "",
-    returnUrl: env.DUITKU_RETURN_URL || env.DUITKU_CALLBACK_URL,
-    callbackUrl: env.DUITKU_CALLBACK_URL,
-    signature,
-  };
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    const M = [];
 
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  return { configured: true, httpStatus: res.status, data };
-}
-
-export default {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return withCors(new Response(null, { status: 204 }), env);
+    for (let i = 0; i < 16; i++) {
+      M[i] = view.getUint32(offset + i * 4, true);
     }
 
-    const url = new URL(request.url);
+    let a = a0, b = b0, c = c0, d = d0;
 
-    try {
-      if (url.pathname === "/health") {
-        return withCors(json({ ok: true, service: "zuplay-backend" }), env);
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
       }
 
-      if (url.pathname === "/api/haybi/balance" && request.method === "GET") {
-        const result = await haybi(env, "/cek-saldo");
-        return withCors(json(result.data, result.httpStatus), env);
-      }
+      const sum = (a + f + K[i] + M[g]) >>> 0;
+      const rotated = (sum << shifts[i]) | (sum >>> (32 - shifts[i]));
+      const nextB = (b + rotated) >>> 0;
 
-      if (url.pathname === "/api/haybi/products" && request.method === "GET") {
-        const category = url.searchParams.get("kategori");
-        const operator = url.searchParams.get("operator");
-        const result = await haybi(env, "/produk", {
-          ...(category ? { kategori: category } : {}),
-          ...(operator ? { operator } : {}),
-        });
-        return withCors(json(result.data, result.httpStatus), env);
-      }
-
-      if (url.pathname === "/api/haybi/status" && request.method === "GET") {
-        const ref_id = url.searchParams.get("ref_id");
-        if (!ref_id) return withCors(json({ error: "ref_id wajib diisi" }, 400), env);
-        const result = await haybi(env, "/cek-status", { ref_id });
-        return withCors(json(result.data, result.httpStatus), env);
-      }
-
-      if (url.pathname === "/api/payment/create" && request.method === "POST") {
-        const order = await request.json();
-        if (!order.order_id || !order.amount || !order.product_name || !order.payment_method) {
-          return withCors(json({ error: "Data pembayaran belum lengkap." }, 400), env);
-        }
-
-        if (env.DB) {
-          await env.DB.prepare(`
-            INSERT OR IGNORE INTO orders
-            (order_id, product_code, product_name, customer_id, amount, payment_method, payment_status, topup_status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'UNPAID', 'WAITING_PAYMENT', datetime('now'))
-          `).bind(
-            order.order_id,
-            order.product_code || null,
-            order.product_name,
-            order.customer_id || null,
-            Number(order.amount),
-            order.payment_method
-          ).run();
-        }
-
-        const payment = await createDuitkuPayment(env, order);
-        return withCors(json({ ok: true, payment }, 200), env);
-      }
-
-      if (url.pathname === "/api/payment/callback" && request.method === "POST") {
-        const form = await request.formData();
-        const merchantCode = form.get("merchantCode") || "";
-        const amount = form.get("amount") || "";
-        const merchantOrderId = form.get("merchantOrderId") || "";
-        const resultCode = form.get("resultCode") || "";
-        const reference = form.get("reference") || "";
-        const signature = form.get("signature") || "";
-
-        const expected = await duitkuSignature(
-          env.DUITKU_API_KEY || "",
-          `${merchantCode}${amount}${merchantOrderId}`
-        );
-
-        if (!signature || signature.toLowerCase() !== expected.toLowerCase()) {
-          return new Response("Invalid signature", { status: 403 });
-        }
-
-        if (!env.DB) return new Response("OK", { status: 200 });
-
-        const paid = resultCode === "00";
-
-        await env.DB.prepare(`
-          UPDATE orders
-          SET payment_status = ?, duitku_reference = ?, updated_at = datetime('now')
-          WHERE order_id = ?
-        `).bind(paid ? "PAID" : "FAILED", reference, merchantOrderId).run();
-
-        if (paid) {
-          const order = await env.DB.prepare(`
-            SELECT * FROM orders WHERE order_id = ?
-          `).bind(merchantOrderId).first();
-
-          if (order && order.product_code && order.customer_id) {
-            const hb = await haybi(env, "/transaksi", {
-              ref_id: merchantOrderId,
-              produk: order.product_code,
-              no_tujuan: order.customer_id,
-            });
-
-            await env.DB.prepare(`
-              UPDATE orders
-              SET topup_status = ?, haybi_response = ?, updated_at = datetime('now')
-              WHERE order_id = ?
-            `).bind(
-              hb.data?.rc === "00" ? "SUCCESS" : "PENDING",
-              JSON.stringify(hb.data),
-              merchantOrderId
-            ).run();
-          }
-        }
-
-        return new Response("OK", { status: 200 });
-      }
-
-      if (url.pathname === "/api/haybi/callback" && request.method === "POST") {
-        const payload = await request.json();
-        const ref_id = payload.ref_id || "";
-        const sign = payload.sign || "";
-        const expected = await md5Hex(`${ref_id}${env.HAYBI_API_KEY || ""}`);
-
-        if (!sign || sign.toLowerCase() !== expected.toLowerCase()) {
-          return new Response("Invalid signature", { status: 403 });
-        }
-
-        if (env.DB && ref_id) {
-          const status =
-            payload.rc === "00" ? "SUCCESS" :
-            payload.rc === "02" ? "FAILED" : "PENDING";
-
-          await env.DB.prepare(`
-            UPDATE orders
-            SET topup_status = ?, haybi_response = ?, updated_at = datetime('now')
-            WHERE order_id = ?
-          `).bind(status, JSON.stringify(payload), ref_id).run();
-        }
-
-        return new Response("OK", { status: 200 });
-      }
-
-      return withCors(json({ error: "Not found" }, 404), env);
-    } catch (error) {
-      return withCors(json({
-        error: "Internal server error",
-        message: error?.message || "Unknown error"
-      }, 500), env);
+      a = d;
+      d = c;
+      c = b;
+      b = nextB;
     }
+
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
   }
-};
+
+  return [a0, b0, c0, d0].map(n =>
+    [0, 8, 16, 24].map(s =>
+      ((n >>> s) & 255).toString(16).padStart(2, "0")
+    ).join("")
+  ).join("");
+                 }
